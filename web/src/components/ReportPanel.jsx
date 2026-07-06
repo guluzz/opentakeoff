@@ -4,25 +4,33 @@
 // "Contribute to the open flooring model" flow.
 import React, { useState } from "react";
 import { Icon } from "../brand/icons.jsx";
-import { conditionTotals, grandTotals, totalsToCsv, downloadText, materialsSummary } from "../lib/totals.js";
+import { conditionTotals, grandTotals, bidTotals, totalsToCsv, downloadText, materialsSummary } from "../lib/totals.js";
 import { buildContribution, sendContribution, isContributeConfigured } from "../lib/contribute.js";
 
 const num = (v, d = 1) => (Number(v) || 0).toLocaleString(undefined, { maximumFractionDigits: d });
+const money = (v) => "$" + (Number(v) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export default function ReportPanel({ projectName, onProjectName, conditions, shapes, sheetLabel, onClose }) {
+export default function ReportPanel({ projectName, onProjectName, conditions, shapes, sheetLabel, bidSettings, onBidSettings, onUpdateCondition, onClose }) {
   const rows = conditionTotals(conditions, shapes).filter((r) => r.shape_count > 0);
   const g = grandTotals(rows);
+  const bid = bidTotals(rows, bidSettings || {});
   const matSummary = materialsSummary(rows);
   const [showContribute, setShowContribute] = useState(false);
 
+  const setBid = (patch) => onBidSettings?.({ ...(bidSettings || {}), ...patch });
+  const orderQty = (r) => (r.price_unit === "LF" ? r.lf_net : r.price_unit === "EA" ? r.ea : r.total_sf_net);
+
   const baseName = (projectName || "takeoff").replace(/[^\w.-]+/g, "_");
-  const exportCsv = () => downloadText(`${baseName}.csv`, totalsToCsv(rows, projectName), "text/csv");
+  const exportCsv = () => downloadText(`${baseName}.csv`, totalsToCsv(rows, projectName, bid), "text/csv");
   const exportJson = () => downloadText(`${baseName}.json`,
-    JSON.stringify({ project_name: projectName || null, generated_with: "OpenTakeoff", conditions: rows, totals: g, materials: matSummary }, null, 2),
+    JSON.stringify({ project_name: projectName || null, generated_with: "OpenTakeoff", conditions: rows, totals: g, bid, materials: matSummary }, null, 2),
     "application/json");
 
   const th = { textAlign: "right", padding: "7px 10px", fontFamily: "var(--f-mono)", fontSize: 9.5, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--ink-muted)", borderBottom: "1px solid var(--ink)", whiteSpace: "nowrap" };
   const td = { textAlign: "right", padding: "8px 10px", fontVariantNumeric: "tabular-nums", borderBottom: "1px solid var(--ink-faint)", whiteSpace: "nowrap" };
+  const priceInput = { width: 62, padding: "3px 5px", border: "1px solid var(--ink-faint)", borderRadius: 0, fontSize: 12, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+  const pctInput = { width: 48, padding: "3px 5px", border: "1px solid var(--ink-faint)", borderRadius: 0, fontSize: 12, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+  const bidRow = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 12px", borderBottom: "1px solid var(--ink-faint)", fontSize: 13 };
 
   return (
     <div style={{ position: "absolute", inset: 0, zIndex: 50, display: "flex", flexDirection: "column", background: "var(--paper-cream)" }}>
@@ -104,6 +112,93 @@ export default function ReportPanel({ projectName, onProjectName, conditions, sh
             <strong>SF ordered</strong> = measured quantity × waste %. Waste is set per condition in the canvas. Wall SF comes from Surface-Area
             traces (run × height); Border SF from Linear runs with a thickness.
           </p>
+        )}
+        {rows.length > 0 && (
+          <div style={{ maxWidth: 980, margin: "28px auto 0" }}>
+            <h3 style={{ fontFamily: "var(--f-display)", fontSize: 14, color: "var(--ink)", margin: "0 0 8px" }}>Pricing &amp; bid</h3>
+            <table style={{ width: "100%", borderCollapse: "collapse", background: "var(--paper-bright)", border: "1px solid var(--ink-faint)" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...th, textAlign: "left" }}>Finish</th>
+                  <th style={th}>Order qty</th>
+                  <th style={th}>Unit</th>
+                  <th style={th}>Material $/unit</th>
+                  <th style={th}>Labor $/unit</th>
+                  <th style={th}>Material $</th>
+                  <th style={th}>Labor $</th>
+                  <th style={{ ...th, color: "var(--cobalt)" }}>Line total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.id}>
+                    <td style={{ ...td, textAlign: "left" }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ width: 12, height: 12, background: r.color, display: "inline-block", border: "1px solid var(--ink-faint)" }} />
+                        <strong style={{ fontFamily: "var(--f-mono)", fontWeight: 600 }}>{r.finish_tag}</strong>
+                      </span>
+                    </td>
+                    <td style={td}>{r.price_unit ? num(orderQty(r)) : "—"}</td>
+                    <td style={{ ...td, color: "var(--ink-muted)" }}>{r.price_unit || "—"}</td>
+                    <td style={td}>
+                      <span style={{ color: "var(--ink-muted)" }}>$</span>
+                      <input type="number" min="0" step="0.01" value={r.price_material || ""} placeholder="0.00"
+                        onChange={(e) => onUpdateCondition?.(r.id, { price_material: Math.max(0, Number(e.target.value) || 0) })}
+                        style={priceInput} />
+                    </td>
+                    <td style={td}>
+                      <span style={{ color: "var(--ink-muted)" }}>$</span>
+                      <input type="number" min="0" step="0.01" value={r.price_labor || ""} placeholder="0.00"
+                        onChange={(e) => onUpdateCondition?.(r.id, { price_labor: Math.max(0, Number(e.target.value) || 0) })}
+                        style={priceInput} />
+                    </td>
+                    <td style={td}>{r.material_cost ? money(r.material_cost) : "—"}</td>
+                    <td style={td}>{r.labor_cost ? money(r.labor_cost) : "—"}</td>
+                    <td style={{ ...td, fontWeight: 700, color: "var(--cobalt)" }}>{r.line_total ? money(r.line_total) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+              <div style={{ width: 360, background: "var(--paper-bright)", border: "1px solid var(--ink)" }}>
+                {[["Material subtotal", money(bid.material_subtotal)], ["Labor subtotal", money(bid.labor_subtotal)], ["Cost subtotal", money(bid.cost_subtotal)]].map(([k, v]) => (
+                  <div key={k} style={bidRow}><span style={{ color: "var(--ink-muted)" }}>{k}</span><span style={{ fontVariantNumeric: "tabular-nums" }}>{v}</span></div>
+                ))}
+                <div style={bidRow}>
+                  <span style={{ color: "var(--ink-muted)" }}>Sales tax (on material)</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <input type="number" min="0" step="0.1" value={(bidSettings?.tax_pct) || ""} placeholder="0"
+                      onChange={(e) => setBid({ tax_pct: Math.max(0, Number(e.target.value) || 0) })} style={pctInput} />%
+                    <span style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(bid.tax)}</span>
+                  </span>
+                </div>
+                <div style={bidRow}>
+                  <span style={{ color: "var(--ink-muted)" }}>Overhead (on cost)</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <input type="number" min="0" step="0.1" value={(bidSettings?.overhead_pct) || ""} placeholder="0"
+                      onChange={(e) => setBid({ overhead_pct: Math.max(0, Number(e.target.value) || 0) })} style={pctInput} />%
+                    <span style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(bid.overhead)}</span>
+                  </span>
+                </div>
+                <div style={bidRow}>
+                  <span style={{ color: "var(--ink-muted)" }}>Profit / margin</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <input type="number" min="0" step="0.1" value={(bidSettings?.profit_pct) || ""} placeholder="0"
+                      onChange={(e) => setBid({ profit_pct: Math.max(0, Number(e.target.value) || 0) })} style={pctInput} />%
+                    <span style={{ width: 76, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{money(bid.profit)}</span>
+                  </span>
+                </div>
+                <div style={{ ...bidRow, borderTop: "2px solid var(--ink)", borderBottom: "none", background: "var(--paper-cream)" }}>
+                  <strong style={{ fontFamily: "var(--f-display)", fontSize: 15 }}>Bid total</strong>
+                  <strong style={{ fontFamily: "var(--f-display)", fontSize: 16, color: "var(--cobalt)", fontVariantNumeric: "tabular-nums" }}>{money(bid.bid_total)}</strong>
+                </div>
+              </div>
+            </div>
+            <p style={{ margin: "10px auto 0", fontSize: 11.5, color: "var(--ink-muted)", lineHeight: 1.6 }}>
+              Enter a unit price per finish (blank = untracked). Material prices the <strong>order quantity</strong> (waste included); labor prices the measured quantity. Tax applies to material, overhead to total cost, profit marks up the rest.
+            </p>
+          </div>
         )}
         {matSummary.length > 0 && (
           <div style={{ maxWidth: 980, margin: "26px auto 0" }}>

@@ -13,8 +13,12 @@ const THUMB_W = 380;
 export default function SheetGallery({
   sheets, getDoc, scales, detectedScales, shapes, labels, onLabel, onDetect,
   thumbCacheRef, busyRef, openTabs, onOpen, onClose, canClose, onAddFiles,
+  onSaveProject, onOpenProject, backup,
+  projects, activeProject, onSwitchProject, onNewProject, onRenameProject, onDeleteProject,
 }) {
   const fileRef = useRef(null);
+  const projectRef = useRef(null);
+  const [projMenuOpen, setProjMenuOpen] = useState(false);
   const [pages, setPages] = useState({});   // file -> numPages (as discovered)
   const [sel, setSel] = useState([]);
   const [sampleBusy, setSampleBusy] = useState(false);
@@ -125,6 +129,14 @@ export default function SheetGallery({
     return () => window.removeEventListener("keydown", onKey);
   }, [canClose, onClose]);
 
+  // close the project dropdown on any outside click
+  useEffect(() => {
+    if (!projMenuOpen) return;
+    const onDown = () => setProjMenuOpen(false);
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [projMenuOpen]);
+
   const toggle = (key) => setSel((g) => (g.includes(key) ? g.filter((k) => k !== key) : [...g, key]));
   const shapeCount = (key) => shapes.reduce((n, s) => n + (s.sheet_id === key ? 1 : 0), 0);
   const labelOf = (key) => {
@@ -141,11 +153,78 @@ export default function SheetGallery({
       style={{ position: "absolute", inset: 0, zIndex: 40, display: "flex", flexDirection: "column", background: "var(--paper-cream)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 18px", borderBottom: "1px solid var(--ink)", background: "var(--paper-bright)" }}>
         <Icon name="sheets" size={18} />
-        <strong style={{ fontFamily: "var(--f-display)", fontSize: 16, color: "var(--ink)" }}>Plan set</strong>
+        {activeProject ? (
+          <div style={{ position: "relative" }} onPointerDown={(e) => e.stopPropagation()}>
+            <button onClick={() => setProjMenuOpen((o) => !o)} title="Switch project, or create / rename / delete"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", border: "1px solid var(--ink-faint)", background: projMenuOpen ? "var(--ink)" : "transparent", color: projMenuOpen ? "var(--paper-bright)" : "var(--ink)", cursor: "pointer", fontFamily: "var(--f-display)", fontSize: 15, maxWidth: 260 }}>
+              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(activeProject.name || "").trim() || "Untitled project"}</span>
+              <Icon name="chevronDown" size={12} />
+            </button>
+            {projMenuOpen && (
+              <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 60, minWidth: 240, background: "var(--paper-bright)", border: "1px solid var(--ink)", boxShadow: "var(--shadow-2)" }}>
+                <div style={{ padding: "6px 12px", fontFamily: "var(--f-mono)", fontSize: 9.5, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--ink-muted)", borderBottom: "1px solid var(--ink-faint)" }}>Projects</div>
+                <div style={{ maxHeight: 260, overflow: "auto" }}>
+                  {(projects || []).map((p) => {
+                    const on = p.id === activeProject.id;
+                    return (
+                      <button key={p.id} onClick={() => { setProjMenuOpen(false); if (!on) onSwitchProject(p.id); }}
+                        style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", border: "none", borderBottom: "1px solid var(--ink-faint)", background: on ? "var(--paper-cream)" : "transparent", color: "var(--ink)", cursor: "pointer", textAlign: "left", fontSize: 13 }}>
+                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: on ? "var(--cobalt)" : "transparent", flex: "0 0 auto" }} />
+                        <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(p.name || "").trim() || "Untitled project"}</span>
+                        {on && <span style={{ fontFamily: "var(--f-mono)", fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--ink-muted)" }}>open</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button onClick={() => { setProjMenuOpen(false); onNewProject(); }}
+                  style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "9px 12px", border: "none", borderTop: "1px solid var(--ink-faint)", background: "transparent", color: "var(--cobalt)", cursor: "pointer", textAlign: "left", fontSize: 13, fontWeight: 600 }}>
+                  <Icon name="plus" size={13} />New project
+                </button>
+                <div style={{ display: "flex", borderTop: "1px solid var(--ink-faint)" }}>
+                  <button onClick={() => { setProjMenuOpen(false); onRenameProject(); }}
+                    style={{ flex: 1, padding: "8px 12px", border: "none", background: "transparent", color: "var(--ink-muted)", cursor: "pointer", fontSize: 12 }}>Rename</button>
+                  <button onClick={() => { setProjMenuOpen(false); onDeleteProject(); }}
+                    style={{ flex: 1, padding: "8px 12px", border: "none", borderLeft: "1px solid var(--ink-faint)", background: "transparent", color: "#b03a26", cursor: "pointer", fontSize: 12 }}>Delete</button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <strong style={{ fontFamily: "var(--f-display)", fontSize: 16, color: "var(--ink)" }}>Plan set</strong>
+        )}
         <span style={{ fontFamily: "var(--f-mono)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--ink-muted)" }}>
-          {allKeys.length || "…"} sheets · pick one or several — the order you pick is the left-to-right order
+          {allKeys.length || "…"} sheets · pick one or several
         </span>
         <div style={{ flex: 1 }} />
+        {backup && (() => {
+          const color = backup.tone === "warn" ? "var(--c-warning)" : backup.tone === "info" ? "var(--cobalt)" : "var(--c-positive)";
+          const title = backup.tone === "warn" ? "Your saved .zip is behind your current work — click Save project to refresh your backup."
+            : backup.tone === "info" ? "This browser can't confirm the download saved — make sure you kept the .zip. For a verified backup, use Chrome (it can overwrite the same file)."
+            : "Your saved .zip matches the work in this browser.";
+          return (
+            <span title={title}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", fontFamily: "var(--f-mono)", fontSize: 11, whiteSpace: "nowrap", color, border: `1px solid ${backup.tone === "ok" ? "var(--ink-faint)" : color}`, background: "var(--paper-bright)" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: color }} />
+              {backup.text}
+            </span>
+          );
+        })()}
+        {onOpenProject && (
+          <>
+            <input ref={projectRef} type="file" accept=".zip,application/zip,application/x-zip-compressed" style={{ display: "none" }}
+              onChange={(e) => { onOpenProject(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => projectRef.current?.click()} title="Open a saved OpenTakeoff project (.zip) — restores its sheets and takeoff, replacing what's open"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", border: "1px solid var(--ink-faint)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontWeight: 600, fontSize: 12.5 }}>
+              <Icon name="document" size={13} />Open project
+            </button>
+          </>
+        )}
+        {onSaveProject && sheets.length > 0 && (
+          <button onClick={onSaveProject} title="Save this whole takeoff — sheets + drawings — to one .zip you can keep as a backup or move to another computer"
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", border: "1px solid var(--ink-faint)", background: "transparent", color: "var(--ink)", cursor: "pointer", fontWeight: 600, fontSize: 12.5 }}>
+            <Icon name="database" size={13} />Save project
+          </button>
+        )}
         {onAddFiles && (
           <>
             <input ref={fileRef} type="file" accept=".pdf,application/pdf,image/*,.zip,application/zip,application/x-zip-compressed" multiple style={{ display: "none" }}

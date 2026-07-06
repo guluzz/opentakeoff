@@ -14,6 +14,9 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { store } from "../lib/store.js";
 import { ingestFiles } from "../lib/ingest.js";
+import { buildProjectZip, importProject, isProjectArchive, resolveSaveTarget, writeToTarget } from "../lib/project.js";
+import { payloadSig, relTime, backupState } from "../lib/backup.js";
+import { loadLibrary, saveConditionToLibrary, deleteLibraryEntry, conditionFromDef } from "../lib/library.js";
 import ToolMenu from "../components/ToolMenu.jsx";
 import SheetGallery from "../components/SheetGallery.jsx";
 import ReportPanel from "../components/ReportPanel.jsx";
@@ -38,6 +41,18 @@ const MAX_CANVAS_AREA = 16384 * 16384 * 0.9;  // safe total-pixel budget per can
 const DETAIL_ENGAGE = 1.15;  // engage once the stage is zoomed past ~1.15× (base raster starts to soften)
 const DETAIL_MARGIN = 0.35;  // render this much extra region beyond the viewport so small pans don't re-render
 const COLORS = ["#c96442", "#2f7d54", "#2563eb", "#9333ea", "#b8860b", "#0d9488", "#be185d", "#475569"];
+
+// ── backup-status tracking ───────────────────────────────────────────────────
+// "Have you exported a .zip that matches your current work?" We remember, per
+// browser, WHEN the last project export happened and a signature of what it held,
+// so the gallery can warn when the on-disk backup is stale versus live edits.
+// CONFIRMED = a File System Access write we saw finish; DOWNLOAD = a browser
+// download we kicked off but can't observe (the user may cancel the save dialog),
+// so it's only ever "exported, unverified" — never a reassuring green.
+const LS_EXPORT_AT = "opentakeoff_last_export";   // ms timestamp of last CONFIRMED save
+const LS_EXPORT_SIG = "opentakeoff_export_sig";   // signature of the confirmed backup
+const LS_DL_AT = "opentakeoff_last_download";     // ms timestamp of last (unverifiable) download
+const LS_DL_SIG = "opentakeoff_download_sig";     // signature of that download
 
 // Architectural / flooring hatch templates. Each condition gets a line color, a
 // fill color (or No Fill), and one hatch style — rendered as an SVG <pattern> so
@@ -341,7 +356,19 @@ export default function TakeoffCanvas() {
   const [saveState, setSaveState] = useState("idle");
   const [commitMsg, setCommitMsg] = useState("");   // transient status line (misnamed for history; just the message bar)
   const [showReport, setShowReport] = useState(false);  // Reports overlay (STACK-style breakdown + export)
-  const [projectName, setProjectName] = useState("");   // optional label for the report header
+  const [projectName, setProjectName] = useState("");   // canonical project name (report header + export filename)
+  const [projects, setProjects] = useState([]);         // the projects registry (for the switcher)
+  const [activeProject, setActiveProject] = useState(null);  // { id, name, ... } currently open
+  const [bidSettings, setBidSettings] = useState({ tax_pct: 0, overhead_pct: 0, profit_pct: 0 });  // job-level pricing markups
+  const [library, setLibrary] = useState([]);   // cross-project assembly library (localStorage)
+  const [libOpen, setLibOpen] = useState(false);
+  // backup status: last export time + signature (seeded from localStorage), and a
+  // slow clock so the "X min ago" age keeps ticking while the gallery is open.
+  const [lastExportAt, setLastExportAt] = useState(() => { const v = Number(localStorage.getItem(LS_EXPORT_AT)); return v > 0 ? v : null; });
+  const [exportedSig, setExportedSig] = useState(() => localStorage.getItem(LS_EXPORT_SIG) || "");
+  const [downloadAt, setDownloadAt] = useState(() => { const v = Number(localStorage.getItem(LS_DL_AT)); return v > 0 ? v : null; });
+  const [downloadSig, setDownloadSig] = useState(() => localStorage.getItem(LS_DL_SIG) || "");
+  const [clockTick, setClockTick] = useState(0);
   const fileInputRef = useRef(null);                    // hidden <input type=file> for "Open PDF"
 
   const containerRef = useRef(null);
@@ -548,6 +575,125 @@ export default function TakeoffCanvas() {
     }
     setCommitMsg(`Opened ${names.length} sheet${names.length === 1 ? "" : "s"}${tail}.`);
   }
+
+  // The exact annotations payload shape the autosave persists — mirrored here so
+  // the project export and the backup-staleness signature stay in lockstep with it.
+  const buildPayload = () => ({ project_name: projectName, sheets: Object.entries(scales).map(([sheet_id, units_per_px]) => ({ sheet_id, units_per_px })), conditions, shapes, markups, sheet_group: sheetGroup, last_group: lastGroup, sheet_tabs: openTabs, bid: bidSettings });
+
+  // Backup staleness for the gallery. `tone` drives the readout color.
+  //   ok    → a CONFIRMED (File System Access) backup still matches the live work
+  //   info  → we exported a download of exactly this work, but can't verify it saved
+  //   warn  → never backed up, or edited since the last backup/export
+  function computeBackupStatus() {
+    const hasWork = shapes.length > 0 || conditions.some((c) => shapes.some((s) => s.condition_id === c.id));
+    if (!hasWork && !sheets.length) return null;            // empty workspace — nothing to back up
+    const st = backupState({ sig: payloadSig(buildPayload()), exportedSig, exportedAt: lastExportAt, downloadSig, downloadAt });
+    const now = Date.now();
+    switch (st.reason) {
+      case "confirmed": return { tone: "ok", text: `Backed up ${relTime(lastExportAt, now)}` };
+      case "downloaded": return { tone: "info", text: `Exported ${relTime(downloadAt, now)} — unverified, keep the .zip` };
+      case "edited": return { tone: "warn", text: "Edited since your last backup — Save project" };
+      default: return { tone: "warn", text: "Not backed up yet — Save project to keep a copy" };
+    }
+  }
+
+  // A CONFIRMED backup — we watched a File System Access write finish, so the .zip
+  // on disk definitely matches this payload (badge → green, survives reload).
+  function markBackedUp(payload) {
+    const now = Date.now(), sig = payloadSig(payload);
+    setLastExportAt(now); setExportedSig(sig);
+    try { localStorage.setItem(LS_EXPORT_AT, String(now)); localStorage.setItem(LS_EXPORT_SIG, sig); } catch { /* private mode */ }
+  }
+  // An UNVERIFIABLE download — we handed the browser a .zip but can't see whether
+  // the user actually saved it (they may cancel the download dialog). Never green.
+  function markDownloaded(payload) {
+    const now = Date.now(), sig = payloadSig(payload);
+    setDownloadAt(now); setDownloadSig(sig);
+    try { localStorage.setItem(LS_DL_AT, String(now)); localStorage.setItem(LS_DL_SIG, sig); } catch { /* private mode */ }
+  }
+
+  // Save the whole takeoff — sheets + drawings — to one .zip. On a browser with
+  // the File System Access API (Chrome/Edge) it overwrites the SAME file you pick
+  // once, so repeat saves across sessions don't pile copies in Downloads; other
+  // browsers fall back to a normal download. We flush live state to the store
+  // first so the archive is never behind the (debounced) autosave.
+  async function handleSaveProject() {
+    try {
+      const payload = buildPayload();
+      // Resolve the destination FIRST, while the button click's user-activation is
+      // still valid — the picker needs it, and a big zip build would outlast it.
+      const target = await resolveSaveTarget({ suggestedName: `${(projectName || "takeoff")}-opentakeoff.zip` });
+      if (target.kind === "cancel") { setCommitMsg("Save cancelled — nothing written."); return; }
+      await store.saveAnnotations(payload);
+      setSaveState("saved");
+      const { bytes, filename, sheets: n } = await buildProjectZip(payload, { onProgress: setCommitMsg, baseName: `${projectName || "takeoff"}-opentakeoff` });
+      const res = await writeToTarget(target, bytes, filename);
+      if (res.where === "file") {
+        markBackedUp(payload);   // write confirmed → green
+        setCommitMsg(`Saved to “${res.name}” — ${n} sheet${n === 1 ? "" : "s"}. Saving again overwrites this same file.`);
+      } else {
+        markDownloaded(payload); // can't confirm the browser's save dialog → “exported, unverified”
+        setCommitMsg(`Download sent — ${n} sheet${n === 1 ? "" : "s"}. Save the .zip somewhere safe; this browser can't confirm it, so the badge stays “unverified” until you re-open it.`);
+      }
+    } catch (e) {
+      setCommitMsg(`Couldn't save the project: ${e.message || e}`);
+    }
+  }
+
+  // Open a saved project .zip — imports it as a NEW project and switches to it.
+  // Non-destructive (nothing existing is touched), so no confirm or backup dance;
+  // reload re-hydrates from the freshly-created, now-active project.
+  async function handleOpenProject(fileList) {
+    const file = Array.from(fileList || [])[0];
+    if (!file) return;
+    setCommitMsg("Reading project…");
+    let isProject = false;
+    try { isProject = await isProjectArchive(file); } catch { /* fall through */ }
+    if (!isProject) { setCommitMsg("That's not an OpenTakeoff project file. To add plans to this project instead, use Open."); return; }
+    try {
+      hydrated.current = false;   // don't let autosave race the reload
+      const { sheets: n, projectName: name } = await importProject(file, { onProgress: setCommitMsg });
+      setCommitMsg(`Imported “${name}” — ${n} sheet${n === 1 ? "" : "s"}. Opening…`);
+      window.location.reload();
+    } catch (e) {
+      hydrated.current = true;
+      setCommitMsg(`Couldn't open that project: ${e.message || e}`);
+    }
+  }
+
+  // ── project management (switch / new / rename / delete) ─────────────────────
+  // Switching is a set-active + reload: every load effect re-reads from the newly
+  // active project's database, so no in-memory state has to be surgically swapped.
+  async function switchToProject(id) {
+    if (!id || id === activeProject?.id) return;
+    hydrated.current = false;
+    await store.setActiveProject(id);
+    window.location.reload();
+  }
+  async function handleNewProject() {
+    const name = (window.prompt("Name this project:", "") || "").trim();
+    if (name === "") return;   // cancelled or blank → do nothing
+    hydrated.current = false;
+    const proj = await store.createProject(name);
+    await store.setActiveProject(proj.id);
+    window.location.reload();
+  }
+  async function handleRenameProject() {
+    if (!activeProject) return;
+    const name = (window.prompt("Rename this project:", activeProject.name || "") || "").trim();
+    if (name === "" || name === activeProject.name) return;
+    await store.renameProject(activeProject.id, name);
+    setProjectName(name);                       // keeps report header + export filename in sync
+    setActiveProject({ ...activeProject, name });
+    setProjects((ps) => ps.map((p) => (p.id === activeProject.id ? { ...p, name } : p)));
+  }
+  async function handleDeleteProject() {
+    if (!activeProject) return;
+    if (!window.confirm(`Delete “${activeProject.name}” and all its sheets and takeoff? This can't be undone.`)) return;
+    hydrated.current = false;
+    await store.deleteProject(activeProject.id);   // store picks the next active (or seeds a fresh one)
+    window.location.reload();
+  }
   useEffect(() => {
     let off = false;
     setStatus("loading");
@@ -557,12 +703,44 @@ export default function TakeoffCanvas() {
     return () => { off = true; };
   }, []);
 
+  // load the projects registry + which one is active (for the switcher dropdown)
+  useEffect(() => {
+    let off = false;
+    Promise.all([store.listProjects(), store.getActiveProject()])
+      .then(([list, active]) => { if (off) return; setProjects(list); setActiveProject(active); })
+      .catch(() => {});
+    return () => { off = true; };
+  }, []);
+
+  // load the cross-project assembly library once
+  useEffect(() => { setLibrary(loadLibrary()); }, []);
+  useEffect(() => {
+    if (!libOpen) return;
+    const onDown = () => setLibOpen(false);
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [libOpen]);
+
+  // Follow the report-header name into the registry so the switcher reflects it —
+  // but only when it's non-empty (an empty report field must never blank a
+  // project's identity; the display falls back to the registry name instead).
+  useEffect(() => {
+    if (!hydrated.current || !activeProject) return;
+    const nm = (projectName || "").trim();
+    if (nm === "" || nm === (activeProject.name || "")) return;
+    store.renameProject(activeProject.id, nm).catch(() => {});
+    setActiveProject((p) => (p ? { ...p, name: nm } : p));
+    setProjects((ps) => ps.map((p) => (p.id === activeProject.id ? { ...p, name: nm } : p)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectName]);
+
   // ── load saved annotations once per project ───────────────────────────────
   useEffect(() => {
     let off = false;
     store.loadAnnotations().then((a) => {
       if (off) return;
       setProjectName(a.project_name || "");
+      if (a.bid && typeof a.bid === "object") setBidSettings({ tax_pct: Number(a.bid.tax_pct) || 0, overhead_pct: Number(a.bid.overhead_pct) || 0, profit_pct: Number(a.bid.profit_pct) || 0 });
       const conds = a.conditions || [];
       if (conds.length) { setConditions(conds); setActiveCond(conds[0].id); }
       else { const seeded = seedConditions(); setConditions(seeded); setActiveCond(seeded[0].id); }   // flooring-first defaults on a fresh workspace
@@ -809,15 +987,27 @@ export default function TakeoffCanvas() {
   // omitting it dropped markup saves and could persist a stale markups array.
   useEffect(() => {
     if (!hydrated.current) return;
-    const payload = { project_name: projectName, sheets: Object.entries(scales).map(([sheet_id, units_per_px]) => ({ sheet_id, units_per_px })), conditions, shapes, markups, sheet_group: sheetGroup, last_group: lastGroup, sheet_tabs: openTabs };
+    const payload = { project_name: projectName, sheets: Object.entries(scales).map(([sheet_id, units_per_px]) => ({ sheet_id, units_per_px })), conditions, shapes, markups, sheet_group: sheetGroup, last_group: lastGroup, sheet_tabs: openTabs, bid: bidSettings };
     saveDataRef.current = payload;          // keep the freshest payload for an unmount flush
     setSaveState("saving");
     const t = setTimeout(() => {
+      // Re-check hydrated: a project switch/import/new/delete sets it false right
+      // before changing the active project, so a save queued for the OLD project
+      // never lands in the NEW one's database.
+      if (!hydrated.current) return;
       store.saveAnnotations(payload).then(() => setSaveState("saved")).catch(() => setSaveState("idle"));
     }, 700);
     return () => clearTimeout(t);
-  }, [shapes, conditions, scales, markups, sheetGroup, lastGroup, openTabs, projectName]);
+  }, [shapes, conditions, scales, markups, sheetGroup, lastGroup, openTabs, projectName, bidSettings]);
   useEffect(() => { saveStateRef.current = saveState; }, [saveState]);
+
+  // Keep the backup-age readout ("5 min ago") ticking while the gallery is open;
+  // no timer runs during tracing, where it isn't shown.
+  useEffect(() => {
+    if (view !== "gallery") return;
+    const id = setInterval(() => setClockTick((t) => t + 1), 60000);
+    return () => clearInterval(id);
+  }, [view]);
 
   // Flush a pending debounced save on navigate-away (unmount), and warn before a
   // tab close while a save is in flight — so the tail of a tracing session is never lost.
@@ -1436,6 +1626,22 @@ export default function TakeoffCanvas() {
   function deleteSelected() { if (selectedId) { setShapes((ss) => ss.filter((s) => s.id !== selectedId)); setSelectedId(null); } }
   function reassignSelected(condId) { if (selectedId) setShapes((ss) => ss.map((s) => (s.id === selectedId ? { ...s, condition_id: condId } : s))); }
 
+  // ── assembly library (reusable finishes across projects) ────────────────────
+  function saveActiveToLibrary() {
+    if (!aCond) { setCommitMsg("Pick a condition to save first."); return; }
+    const name = (window.prompt("Save this finish to your library as:", aCond.finish_tag || "") || "").trim();
+    if (!name) return;
+    const { list } = saveConditionToLibrary(aCond, name);
+    setLibrary(list); setLibOpen(false);
+    setCommitMsg(`Saved “${name}” to your library — reuse it in any project.`);
+  }
+  function addFromLibrary(entry) {
+    const c = conditionFromDef(entry.def, uid);
+    setConditions((cs) => [...cs, c]); setActiveCond(c.id); setLibOpen(false);
+    setCommitMsg(`Added “${entry.name}” from your library.`);
+  }
+  function removeLibEntry(id, e) { e.stopPropagation(); setLibrary(deleteLibraryEntry(id)); }
+
   function addCondition() {
     const tag = (window.prompt("Finish tag for this condition (e.g. LVT-1):") || "").trim();
     if (!tag) return;
@@ -1453,6 +1659,7 @@ export default function TakeoffCanvas() {
     setConditions((cs) => [...cs, c]); setActiveCond(c.id);
   }
   const updateCond = (patch) => setConditions((cs) => cs.map((c) => (c.id === activeCond ? { ...c, ...patch } : c)));
+  const updateCondById = (id, patch) => setConditions((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)));
 
   // delete a condition entirely (and its takeoffs); pick a new active one
   function deleteCondition(id) {
@@ -1569,9 +1776,11 @@ export default function TakeoffCanvas() {
           style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", border: "1px solid var(--ink)", background: "var(--ink)", color: "var(--paper-bright)", cursor: "pointer", fontWeight: 600, fontSize: 12.5, lineHeight: 1 }}>
           <Icon name="plus" size={14} />Open</button>
         <button type="button" onClick={() => setView("gallery")}
-          title="Plan set — the visual gallery; open one or several sheets (G)"
-          style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", border: `1px solid ${sheetGroup.length ? "var(--cobalt)" : "var(--ink-faint)"}`, background: sheetGroup.length ? "var(--cobalt)" : "transparent", color: sheetGroup.length ? "var(--paper-bright)" : "var(--ink)", cursor: "pointer", fontWeight: 600, fontSize: 12.5, lineHeight: 1 }}>
-          <Icon name="sheets" size={15} />Sheets{sheetGroup.length ? ` (${sheetGroup.length})` : ""}
+          title="Projects & plan sheets — switch projects or open sheets (G)"
+          style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", border: `1px solid ${sheetGroup.length ? "var(--cobalt)" : "var(--ink-faint)"}`, background: sheetGroup.length ? "var(--cobalt)" : "transparent", color: sheetGroup.length ? "var(--paper-bright)" : "var(--ink)", cursor: "pointer", fontWeight: 600, fontSize: 12.5, lineHeight: 1, maxWidth: 220 }}>
+          <Icon name="sheets" size={15} />
+          <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{(projectName || "").trim() || activeProject?.name || "Projects"}</span>
+          {sheetGroup.length ? ` · ${sheetGroup.length}` : ""}
         </button>
         {sheetGroup.length > 0 && (
           <button type="button" onClick={ungroup} title="Back to one sheet — you land on the sheet you were last working; every sheet keeps its takeoffs and markups"
@@ -1726,6 +1935,40 @@ export default function TakeoffCanvas() {
           );
         })}
         <button onClick={addCondition} style={{ padding: "4px 10px", borderRadius: 0, border: "1px dashed var(--ink-faint)", background: "transparent", cursor: "pointer", fontSize: 12.5, color: "var(--ink-muted)" }}>+ condition</button>
+        <div style={{ position: "relative" }} onPointerDown={(e) => e.stopPropagation()}>
+          <button onClick={() => setLibOpen((o) => !o)} title="Reusable finishes saved across all your projects — add one here, or save the current finish"
+            style={{ padding: "4px 10px", borderRadius: 0, border: `1px solid ${libOpen ? "var(--ink)" : "var(--ink-faint)"}`, background: libOpen ? "var(--ink)" : "transparent", color: libOpen ? "var(--paper-bright)" : "var(--ink-muted)", cursor: "pointer", fontSize: 12.5 }}>
+            ★ Library{library.length ? ` (${library.length})` : ""} ▾
+          </button>
+          {libOpen && (
+            <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, zIndex: 60, width: 280, background: "var(--paper-bright)", border: "1px solid var(--ink)", boxShadow: "var(--shadow-2)" }}>
+              <button onClick={saveActiveToLibrary} disabled={!aCond}
+                style={{ display: "flex", alignItems: "center", gap: 7, width: "100%", padding: "9px 12px", border: "none", borderBottom: "1px solid var(--ink-faint)", background: "transparent", color: aCond ? "var(--cobalt)" : "var(--ink-faint)", cursor: aCond ? "pointer" : "default", textAlign: "left", fontSize: 12.5, fontWeight: 600 }}>
+                <Icon name="plus" size={12} />Save “{aCond?.finish_tag || "current"}” to library
+              </button>
+              <div style={{ maxHeight: 240, overflow: "auto" }}>
+                {library.length === 0 ? (
+                  <div style={{ padding: "12px", fontSize: 12, color: "var(--ink-muted)", lineHeight: 1.5 }}>No saved finishes yet. Set up a condition (hatch, waste, materials, pricing) and save it here to reuse on every job.</div>
+                ) : library.map((e) => (
+                  <div key={e.id} onClick={() => addFromLibrary(e)}
+                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 8px 12px", borderBottom: "1px solid var(--ink-faint)", cursor: "pointer" }}>
+                    <span style={{ borderRadius: 3, overflow: "hidden", lineHeight: 0, flex: "0 0 auto" }}><HatchSwatch type={e.def?.hatch || "solid"} line={e.def?.color} fill={e.def?.fill} /></span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{e.name}</div>
+                      <div style={{ fontSize: 10.5, color: "var(--ink-muted)" }}>
+                        {e.def?.waste_pct ? `${e.def.waste_pct}% waste` : "no waste"}
+                        {(e.def?.price_material || e.def?.price_labor) ? ` · $${(Number(e.def.price_material) || 0) + (Number(e.def.price_labor) || 0)}/unit` : ""}
+                        {e.def?.materials?.length ? ` · ${e.def.materials.length} mat` : ""}
+                      </div>
+                    </span>
+                    <button onClick={(ev) => removeLibEntry(e.id, ev)} title="Remove from library"
+                      style={{ border: "none", background: "none", color: "#b03a26", cursor: "pointer", fontSize: 14, padding: "0 2px", flex: "0 0 auto" }}>×</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
         <span style={{ fontSize: 10.5, color: "var(--ink-faint)", marginLeft: 4 }}>⌫ undo point · Esc cancel · scroll = zoom · pan mid-measure: just press-and-drag (click without dragging places the point)</span>
         {commitMsg && <span style={{ marginLeft: "auto", fontSize: 12, color: commitMsg.startsWith("Commit failed") ? "#b03a26" : "var(--c-positive)" }}>{commitMsg}</span>}
       </div>
@@ -2125,6 +2368,12 @@ export default function TakeoffCanvas() {
           thumbCacheRef={thumbCacheRef} busyRef={statusRef}
           openTabs={openTabs} onOpen={openSheets} onClose={() => setView("canvas")} canClose={openTabs.length > 0}
           onAddFiles={handleFiles}
+          onSaveProject={handleSaveProject} onOpenProject={handleOpenProject}
+          backup={computeBackupStatus()}
+          projects={projects}
+          activeProject={activeProject ? { ...activeProject, name: (projectName || "").trim() || activeProject.name } : null}
+          onSwitchProject={switchToProject} onNewProject={handleNewProject}
+          onRenameProject={handleRenameProject} onDeleteProject={handleDeleteProject}
         />
       )}
 
@@ -2133,6 +2382,8 @@ export default function TakeoffCanvas() {
           projectName={projectName} onProjectName={setProjectName}
           conditions={conditions} shapes={shapes}
           sheetLabel={(k) => tabLabel(k)}
+          bidSettings={bidSettings} onBidSettings={setBidSettings}
+          onUpdateCondition={updateCondById}
           onClose={() => setShowReport(false)}
         />
       )}
