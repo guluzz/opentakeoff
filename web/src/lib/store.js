@@ -1,15 +1,17 @@
 // Storage adapter — the seam that replaces the backend.
 //
 // OpenTakeoff is client-only by default: the takeoff canvas talks to `store`,
-// never to a server. `localStore` keeps PDFs in IndexedDB (they're too big for
-// localStorage) and the annotations JSON in localStorage. The same four-method
-// interface is all the canvas needs, so a hosted backend can be dropped in later
-// by implementing the same shape (see `apiStore` stub at the bottom).
+// never to a server. Each PROJECT is its own IndexedDB database holding that
+// project's plan PDFs and its annotations JSON; a small registry in localStorage
+// lists the projects and which one is active. Every data method below operates on
+// the ACTIVE project, so the canvas is unchanged — it just sees "the workspace".
 //
-//   listSheets()              -> [{ name }]                (the loaded plan PDFs)
+//   listSheets()              -> [{ name }]                (active project's PDFs)
 //   loadPdfData(name)         -> Uint8Array                (bytes for pdf.js)
 //   loadAnnotations()         -> { conditions, shapes, ... }
 //   saveAnnotations(payload)  -> Promise<void>
+//   addPdf(file) / removePdf(name)
+//   save/loadFileHandle()     -> the "Save project" target, per project
 //
 // Plus local-only helpers the drag-drop entry needs: addPdf(file), removePdf(name).
 // And local-only snapshot helpers (like addPdf/removePdf, not part of the seam):
@@ -27,8 +29,16 @@
 import { sanitizeTemplates } from "./templates.js";
 import { sanitizeMaterialLibrary } from "./materials.js";
 import { sanitizeStampLibrary } from "./stamps.js";
+import {
+  DEFAULT_PROJECT_ID, makeProject, upsertProject, renameInList,
+  touchInList, removeFromList, nextActiveId,
+} from "./projects.js";
 
-const DB_NAME = "opentakeoff";
+// One IndexedDB database PER PROJECT: dbNameFor maps the active project id to
+// its database. The pre-multiproject workspace keeps its legacy name so the
+// existing single-project data becomes the "default" project with nothing copied.
+const LEGACY_DB = "opentakeoff";        // the pre-multiproject workspace → the "default" project
+const DB_PREFIX = "opentakeoff__";      // every other project: opentakeoff__<id>
 const DB_VERSION = 3;
 const PDF_STORE = "pdfs";          // key: file name -> { name, bytes: ArrayBuffer, hash?, rev?, ts? }
 const META_STORE = "meta";         // key: "annotations" -> payload object
@@ -40,6 +50,7 @@ const SNAP_STORE = "snapshots";    // key: id -> { id, ts, label, payload }
 const REV_STORE = "pdf_revs";      // key -> { key, name, rev, hash, ts, bytes }
 const revKey = (name, rev) => `${name}\u0000${rev}`;
 const ANN_KEY = "annotations";
+const HANDLE_KEY = "project_file_handle";   // the "Save project" target (FileSystemFileHandle), per project
 // condition template library — browser-global (not part of a project payload),
 // lives under its own key in the keyPath-less meta store: no DB version bump
 const TPL_KEY = "condition_templates";
@@ -52,6 +63,41 @@ const MATLIB_KEY = "material_library";
 // (no DB version bump). Persists across projects; export/import as JSON.
 const STAMPLIB_KEY = "stamp_library";
 const ANN_SCHEMA = "opentakeoff.takeoff_canvas.v1";
+
+// Project registry (localStorage) + per-project dispatch — every data method
+// below operates on the ACTIVE project's database (see the header comment):
+//   listProjects() / getActiveProject() / setActiveProject(id)
+//   createProject(name) / renameProject(id,name) / deleteProject(id)
+const LS_PROJECTS = "opentakeoff_projects"; // registry: [{ id, name, createdAt, updatedAt }]
+const LS_ACTIVE = "opentakeoff_active";     // active project id
+
+const now = () => Date.now();
+const newId = () => (globalThis.crypto?.randomUUID?.() || `p_${now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`);
+const dbNameFor = (pid) => (pid === DEFAULT_PROJECT_ID ? LEGACY_DB : DB_PREFIX + pid);
+
+// ── registry (localStorage) ──────────────────────────────────────────────────
+function readProjects() {
+  try { const v = JSON.parse(localStorage.getItem(LS_PROJECTS)); return Array.isArray(v) ? v : []; }
+  catch { return []; }
+}
+function writeProjects(list) { try { localStorage.setItem(LS_PROJECTS, JSON.stringify(list)); } catch { /* private mode */ } }
+function writeActive(id) { try { localStorage.setItem(LS_ACTIVE, id); } catch { /* private mode */ } }
+function readActive() { try { return localStorage.getItem(LS_ACTIVE) || null; } catch { return null; } }
+
+// Seed the default project on first run so the existing single workspace (already
+// in the legacy DB) becomes project #1 with nothing copied.
+function ensureInit() {
+  let list = readProjects();
+  if (!list.length) {
+    list = [makeProject(DEFAULT_PROJECT_ID, "Project 1", now())];
+    writeProjects(list);
+    writeActive(DEFAULT_PROJECT_ID);
+  } else if (!readActive() || !list.some((p) => p.id === readActive())) {
+    writeActive((nextActiveId(list)) || list[0].id);
+  }
+  return list;
+}
+function activeId() { ensureInit(); return readActive() || DEFAULT_PROJECT_ID; }
 
 // The empty-project annotations shape. One definition so the local store and the
 // Drive-backed cloud store (cloudStore.js) hydrate a fresh project identically —
@@ -69,9 +115,10 @@ export function emptyAnnotations() {
   return { schema: ANN_SCHEMA, conditions: [], shapes: [], markups: [], sheets: [], sheet_group: [], last_group: [], sheet_tabs: [], rules: [], approvals: [], stitches: [] };
 }
 
-function openDB() {
+// ── IndexedDB (one database per project) ─────────────────────────────────────
+function openDB(pid) {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(dbNameFor(pid), DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       // contains-guards make this run for fresh creates and every vN->v3 upgrade
@@ -120,6 +167,14 @@ function openDB() {
     };
   });
 }
+function deleteDB(pid) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(dbNameFor(pid));
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => resolve();   // another tab holds it open; it'll drop when that closes
+  });
+}
 
 // True when a store call failed because this tab is out of step with the DB
 // version (either older or newer than another open tab) — the fix is the same
@@ -144,9 +199,9 @@ export function friendlyStoreError(e) {
 
 // Open, run, ALWAYS close — even when fn throws (a DataCloneError inside a
 // put, say). A leaked open connection blocks every future version upgrade
-// in every tab.
+// in every tab. Opens the ACTIVE project's database (per-project dispatch).
 async function withDb(fn) {
-  const db = await openDB();
+  const db = await openDB(activeId());
   try {
     return await fn(db);
   } finally {
@@ -286,7 +341,58 @@ export const localStore = {
   },
 
   async saveAnnotations(payload) {
+    const pid = activeId();
     await withDb((db) => tx(db, META_STORE, "readwrite", (os) => os.put({ ...payload, schema: ANN_SCHEMA }, ANN_KEY)));
+    writeProjects(touchInList(readProjects(), pid, now()));   // updatedAt reflects last edit
+  },
+
+  // The chosen "Save project" file (a FileSystemFileHandle) is structured-
+  // cloneable, so IndexedDB can persist it — Save then overwrites the same file
+  // across a session instead of downloading a fresh copy each time. Per project.
+  async saveFileHandle(handle) {
+    await withDb((db) => tx(db, META_STORE, "readwrite", (os) => os.put(handle, HANDLE_KEY)));
+  },
+
+  async loadFileHandle() {
+    const h = await withDb((db) => tx(db, META_STORE, "readonly", (os) => os.get(HANDLE_KEY)));
+    return h || null;
+  },
+
+  // ── projects ───────────────────────────────────────────────────────────────
+  async listProjects() { return ensureInit(); },
+
+  async getActiveProject() {
+    const list = ensureInit();
+    const id = activeId();
+    return list.find((p) => p.id === id) || list[0] || null;
+  },
+
+  async setActiveProject(id) { ensureInit(); writeActive(id); },
+
+  // Create a new (empty) project. Does NOT switch to it — the caller decides.
+  async createProject(name) {
+    const list = ensureInit();
+    const proj = makeProject(newId(), name || "Untitled project", now());
+    writeProjects(upsertProject(list, proj));
+    return proj;
+  },
+
+  async renameProject(id, name) {
+    writeProjects(renameInList(ensureInit(), id, name, now()));
+  },
+
+  // Delete a project and its whole database. Returns the id that should be active
+  // next (the most-recently-updated survivor, or null if none remain).
+  async deleteProject(id) {
+    const remaining = removeFromList(ensureInit(), id);
+    writeProjects(remaining);
+    await deleteDB(id);
+    if (readActive() === id) {
+      const next = nextActiveId(remaining);
+      if (next) writeActive(next); else { try { localStorage.removeItem(LS_ACTIVE); } catch { /* ignore */ } }
+      return next;
+    }
+    return readActive();
   },
 
   async loadTemplates() {

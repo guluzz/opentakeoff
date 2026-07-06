@@ -1,10 +1,56 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 // totals.js is plain JS (allowJs); the tsx loader resolves it from the .ts test.
-import { conditionTotals, materialsSummary, verticalWallSf, sheetTotals, reportJson } from "../src/lib/totals.js";
+import { conditionTotals, materialsSummary, bidTotals, verticalWallSf, sheetTotals, reportJson } from "../src/lib/totals.js";
 
 const area = (id: string, sf: number) => ({ condition_id: id, measure_role: "floor_area", computed: { area_sf: sf } });
 const lin = (id: string, lf: number) => ({ condition_id: id, measure_role: "linear", computed: { perimeter_lf: lf } });
+const cnt = (id: string) => ({ condition_id: id, measure_role: "count", computed: { count: 1 } });
+
+test("pricing: material on order-qty (with waste), labor on measured-qty", () => {
+  const conds = [{ id: "lvt", finish_tag: "LVT-1", waste_pct: 10, price_material: 2, price_labor: 3 }];
+  const [r] = conditionTotals(conds, [area("lvt", 100)]);
+  assert.equal(r.price_unit, "SF");
+  assert.equal(r.material_cost, 220); // 100 * 1.10 waste * $2
+  assert.equal(r.labor_cost, 300);    // 100 measured * $3
+  assert.equal(r.line_total, 520);
+});
+
+test("pricing: linear condition prices per LF; count prices per EA (no waste on count)", () => {
+  const [lr] = conditionTotals([{ id: "rb", finish_tag: "RB-1", waste_pct: 5, price_material: 1, price_labor: 2 }], [lin("rb", 100)]);
+  assert.equal(lr.price_unit, "LF");
+  assert.equal(lr.material_cost, 105); // 100 * 1.05 * $1
+  assert.equal(lr.labor_cost, 200);    // 100 * $2
+  const [cr] = conditionTotals([{ id: "tr", finish_tag: "TR-1", waste_pct: 50, price_material: 4, price_labor: 6 }], [cnt("tr"), cnt("tr")]);
+  assert.equal(cr.price_unit, "EA");
+  assert.equal(cr.material_cost, 8);   // 2 EA * $4 (waste ignored for counts)
+  assert.equal(cr.labor_cost, 12);
+});
+
+test("pricing: no unit price → zero cost, priced=false in the bid", () => {
+  const rows = conditionTotals([{ id: "a", finish_tag: "A" }], [area("a", 100)]);
+  assert.equal(rows[0].line_total, 0);
+  assert.equal(bidTotals(rows).priced, false);
+});
+
+test("bidTotals: tax on material, overhead on cost, profit markup on the rest", () => {
+  const rows = conditionTotals([{ id: "lvt", finish_tag: "LVT-1", waste_pct: 10, price_material: 2, price_labor: 3 }], [area("lvt", 100)]);
+  const b = bidTotals(rows, { tax_pct: 8, overhead_pct: 10, profit_pct: 15 });
+  assert.equal(b.material_subtotal, 220);
+  assert.equal(b.labor_subtotal, 300);
+  assert.equal(b.cost_subtotal, 520);
+  assert.equal(b.tax, 17.6);        // 8% of 220 material
+  assert.equal(b.overhead, 52);     // 10% of 520 cost
+  assert.equal(b.profit, 88.44);    // 15% of (520 + 17.6 + 52 = 589.6)
+  assert.equal(b.bid_total, 678.04);
+  assert.equal(b.priced, true);
+});
+
+test("bidTotals: zero markups → bid equals cost subtotal", () => {
+  const rows = conditionTotals([{ id: "lvt", finish_tag: "LVT-1", price_material: 1, price_labor: 1 }], [area("lvt", 50)]);
+  const b = bidTotals(rows, {});
+  assert.equal(b.bid_total, b.cost_subtotal);
+});
 
 test("materials: order qty = area ÷ coverage, rounded up to whole units", () => {
   const conds = [{

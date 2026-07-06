@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4581"/>
+      <stop offset="1" stop-color="#0f2749"/>
+    </linearGradient>
+    <marker id="arrowStart" markerWidth="10" markerHeight="10" refX="1" refY="5" orient="auto">
+      <path d="M9,1 L1,5 L9,9 Z" fill="#eaf2ff"/>
+    </marker>
+    <marker id="arrowEnd" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M1,1 L9,5 L1,9 Z" fill="#eaf2ff"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- blueprint grid -->
+  <g stroke="#eaf2ff" stroke-opacity="0.09" stroke-width="2">
+    <line x1="64" y1="0" x2="64" y2="1024"/>
+    <line x1="128" y1="0" x2="128" y2="1024"/>
+    <line x1="192" y1="0" x2="192" y2="1024"/>
+    <line x1="256" y1="0" x2="256" y2="1024"/>
+    <line x1="320" y1="0" x2="320" y2="1024"/>
+    <line x1="384" y1="0" x2="384" y2="1024"/>
+    <line x1="448" y1="0" x2="448" y2="1024"/>
+    <line x1="512" y1="0" x2="512" y2="1024"/>
+    <line x1="576" y1="0" x2="576" y2="1024"/>
+    <line x1="640" y1="0" x2="640" y2="1024"/>
+    <line x1="704" y1="0" x2="704" y2="1024"/>
+    <line x1="768" y1="0" x2="768" y2="1024"/>
+    <line x1="832" y1="0" x2="832" y2="1024"/>
+    <line x1="896" y1="0" x2="896" y2="1024"/>
+    <line x1="960" y1="0" x2="960" y2="1024"/>
+
+    <line y1="64" x1="0" y2="64" x2="1024"/>
+    <line y1="128" x1="0" y2="128" x2="1024"/>
+    <line y1="192" x1="0" y2="192" x2="1024"/>
+    <line y1="256" x1="0" y2="256" x2="1024"/>
+    <line y1="320" x1="0" y2="320" x2="1024"/>
+    <line y1="384" x1="0" y2="384" x2="1024"/>
+    <line y1="448" x1="0" y2="448" x2="1024"/>
+    <line y1="512" x1="0" y2="512" x2="1024"/>
+    <line y1="576" x1="0" y2="576" x2="1024"/>
+    <line y1="640" x1="0" y2="640" x2="1024"/>
+    <line y1="704" x1="0" y2="704" x2="1024"/>
+    <line y1="768" x1="0" y2="768" x2="1024"/>
+    <line y1="832" x1="0" y2="832" x2="1024"/>
+    <line y1="896" x1="0" y2="896" x2="1024"/>
+    <line y1="960" x1="0" y2="960" x2="1024"/>
+  </g>
+
+  <!-- L-shaped floor plan outline -->
+  <path d="M 192,192 L 592,192 L 592,432 L 832,432 L 832,832 L 192,832 Z"
+        fill="#eaf2ff" fill-opacity="0.06"
+        stroke="#f4f8ff" stroke-width="26" stroke-linejoin="round"/>
+
+  <!-- door opening + swing arc -->
+  <g stroke="#f4f8ff" stroke-width="10" fill="none">
+    <line x1="440" y1="832" x2="440" y2="792"/>
+    <line x1="560" y1="832" x2="560" y2="792"/>
+    <path d="M 440,792 A 120,120 0 0 1 560,792" stroke-dasharray="4 16" stroke-linecap="round"/>
+    <line x1="440" y1="792" x2="440" y2="672" stroke-dasharray="none"/>
+  </g>
+
+  <!-- dimension line -->
+  <line x1="192" y1="920" x2="832" y2="920"
+        stroke="#eaf2ff" stroke-width="8"
+        marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)"/>
+  <line x1="192" y1="896" x2="192" y2="944" stroke="#eaf2ff" stroke-width="8"/>
+  <line x1="832" y1="896" x2="832" y2="944" stroke="#eaf2ff" stroke-width="8"/>
+</svg>

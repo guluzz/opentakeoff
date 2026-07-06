@@ -89,6 +89,17 @@ export function conditionTotals(conditions, shapes, ctx = null) {
       qty = m.round === false ? round2(qty) : Math.ceil(qty - 1e-9);
       return { name: m.name, unit: m.unit || "", per, basis: m.basis || "area", round: m.round !== false, note: m.note || "", basis_qty: round2(basisVal), qty };
     });
+    // Pricing: one unit price pair per condition, applied to its PRIMARY measure.
+    // Material is priced on the ORDER quantity (with waste — you buy the waste);
+    // labor on the MEASURED quantity (you install what's there). Area wins if a
+    // condition mixes measures — keep one finish to one measure for a clean bid.
+    const priceMat = Math.max(0, Number(c.price_material) || 0);
+    const priceLab = Math.max(0, Number(c.price_labor) || 0);
+    const priceUnit = total > 0 ? "SF" : lf > 0 ? "LF" : ea > 0 ? "EA" : "";
+    const matQty = priceUnit === "SF" ? total * w : priceUnit === "LF" ? lf * w : ea;   // order qty (waste in for SF/LF)
+    const labQty = priceUnit === "SF" ? total : priceUnit === "LF" ? lf : ea;           // measured qty
+    const material_cost = round2(matQty * priceMat);
+    const labor_cost = round2(labQty * priceLab);
     return {
       id: c.id, finish_tag: c.finish_tag, color: c.color, fill: c.fill, hatch: c.hatch,
       multiplier: mult, waste_pct: waste, shape_count: cs.length,
@@ -101,8 +112,34 @@ export function conditionTotals(conditions, shapes, ctx = null) {
       total_sf_net: round2(total * w),
       sy_net: round2((total * w) / 9),
       materials,
+      // pricing
+      price_unit: priceUnit, price_material: priceMat, price_labor: priceLab,
+      material_cost, labor_cost, line_total: round2(material_cost + labor_cost),
     };
   });
+}
+
+// Roll per-condition costs into a bid: material sub + labor sub, then sales tax
+// (on materials), overhead (on cost), and profit markup (on cost+tax+overhead).
+export function bidTotals(rows, settings = {}) {
+  const pct = (v) => Math.max(0, Number(v) || 0) / 100;
+  const taxP = pct(settings.tax_pct), ohP = pct(settings.overhead_pct), profP = pct(settings.profit_pct);
+  const material_subtotal = round2(rows.reduce((n, r) => n + (r.material_cost || 0), 0));
+  const labor_subtotal = round2(rows.reduce((n, r) => n + (r.labor_cost || 0), 0));
+  const cost_subtotal = round2(material_subtotal + labor_subtotal);
+  const tax = round2(material_subtotal * taxP);
+  const overhead = round2(cost_subtotal * ohP);
+  const pre_profit = round2(cost_subtotal + tax + overhead);
+  const profit = round2(pre_profit * profP);
+  const bid_total = round2(pre_profit + profit);
+  return {
+    material_subtotal, labor_subtotal, cost_subtotal,
+    tax_pct: Math.max(0, Number(settings.tax_pct) || 0), tax,
+    overhead_pct: Math.max(0, Number(settings.overhead_pct) || 0), overhead,
+    profit_pct: Math.max(0, Number(settings.profit_pct) || 0), profit,
+    bid_total,
+    priced: cost_subtotal > 0,
+  };
 }
 
 // Per-sheet subtotals: the same role math as conditionTotals, grouped by
@@ -358,12 +395,26 @@ export function grandTotals(rows) {
  *   dimensioned column/section to m²/m and RETIRES the SY column (upstream's
  *   metric contract); coverage rates in the materials section stay as entered
  *   (SF/LF-based). "imperial" (default) is byte-identical to the frozen export.
+ * @param {ReturnType<typeof bidTotals>|null} [bid] pass a bidTotals() result to
+ *   append pricing columns to the condition table plus a bid summary section;
+ *   null/unpriced keeps the output byte-identical to the frozen export.
  * @returns {string}
  */
-export function totalsToCsv(rows, projectName = "", bySheet = null, sheetLabel = null, cols = null, ctx = null, byLabel = null, brandName = "OpenTakeoff", units = "imperial") {
+export function totalsToCsv(rows, projectName = "", bySheet = null, sheetLabel = null, cols = null, ctx = null, byLabel = null, brandName = "OpenTakeoff", units = "imperial", bid = null) {
   // the caller passes RAW descriptors; conversion happens here (one site per
   // output) through the same applyUnits seam the report table uses
-  const columns = applyUnits(cols || CSV_PROFILE.filter((c) => c.defaultVisible), units, METRIC_CSV_LABELS);
+  const priced = !!(bid && bid.priced);
+  // pricing columns (currency, not dimensioned) append after the unit-converted
+  // profile columns — same slot they held in the pre-profile layout
+  const priceCols = priced ? [
+    { key: "price_unit", header: "Unit", get: (r) => r.price_unit ?? "" },
+    { key: "price_material", header: "Material $/unit", get: (r) => r.price_material ?? "" },
+    { key: "price_labor", header: "Labor $/unit", get: (r) => r.price_labor ?? "" },
+    { key: "material_cost", header: "Material $", get: (r) => r.material_cost ?? "" },
+    { key: "labor_cost", header: "Labor $", get: (r) => r.labor_cost ?? "" },
+    { key: "line_total", header: "Line total $", get: (r) => r.line_total ?? "" },
+  ] : [];
+  const columns = [...applyUnits(cols || CSV_PROFILE.filter((c) => c.defaultVisible), units, METRIC_CSV_LABELS), ...priceCols];
   const M = units === "metric";
   const AU = M ? "m2" : "SF", LU = M ? "m" : "LF";
   const A = (v) => (M ? round2((Number(v) || 0) * M2_PER_SF) : v);
@@ -379,6 +430,12 @@ export function totalsToCsv(rows, projectName = "", bySheet = null, sheetLabel =
   // by-key reads convert exactly like the body cells.
   const foot = (c) => {
     if (c.key === "finish") return "TOTAL";
+    // pricing columns total to the bid subtotals (material/labor/line)
+    if (priced) {
+      if (c.key === "material_cost") return bid.material_subtotal;
+      if (c.key === "labor_cost") return bid.labor_subtotal;
+      if (c.key === "line_total") return bid.cost_subtotal;
+    }
     // derived waste feet: same getter as the body cells (g carries all four inputs)
     const v = (c.key === "waste_sf" || c.key === "waste_lf") ? GETTERS[c.key](g) : (g[c.key] !== undefined ? g[c.key] : "");
     return c.conv && v !== "" ? c.conv(v) : v;
@@ -429,6 +486,19 @@ export function totalsToCsv(rows, projectName = "", bySheet = null, sheetLabel =
       const name = g.value || "Unlabeled";
       for (const row of g.rows) lines.push([name, row.finish_tag, A(row.floor_sf), A(row.wall_sf), A(row.border_sf), L(row.lf), row.ea].map(esc).join(","));
     }
+  }
+
+  // bid summary — the priced bottom line
+  if (priced) {
+    lines.push("");
+    lines.push(["Bid summary", "Amount $"].map(esc).join(","));
+    lines.push(["Material subtotal", bid.material_subtotal].map(esc).join(","));
+    lines.push(["Labor subtotal", bid.labor_subtotal].map(esc).join(","));
+    lines.push(["Cost subtotal", bid.cost_subtotal].map(esc).join(","));
+    lines.push([`Sales tax (${bid.tax_pct}% of material)`, bid.tax].map(esc).join(","));
+    lines.push([`Overhead (${bid.overhead_pct}% of cost)`, bid.overhead].map(esc).join(","));
+    lines.push([`Profit (${bid.profit_pct}%)`, bid.profit].map(esc).join(","));
+    lines.push(["BID TOTAL", bid.bid_total].map(esc).join(","));
   }
 
   const title = projectName ? `# ${projectName} — ${brandName} report\n` : "";

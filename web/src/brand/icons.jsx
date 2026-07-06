@@ -47,6 +47,8 @@ export const icons = {
   chevronDown: (s) => <I size={s}><path d="M6 9 L 12 15 L 18 9" /></I>,
   chevronLeft: (s) => <I size={s}><path d="M15 6 L 9 12 L 15 18" /></I>,
   chevronRight: (s) => <I size={s}><path d="M9 6 L 15 12 L 9 18" /></I>,
+  // database — the project-archive glyph for "Save project" (local .zip backup)
+  database: (s) => <I size={s}><ellipse cx="12" cy="5.5" rx="8" ry="2.5" /><path d="M4 5.5 V 12 C 4 13.5, 7.5 14.5, 12 14.5 S 20 13.5, 20 12 V 5.5" /><path d="M4 12 V 18.5 C 4 20, 7.5 21, 12 21 S 20 20, 20 18.5 V 12" /></I>,
   markup: (s) => <I size={s}><path d="M12 3 L 17 10 L 12 21 L 7 10 Z" /><line x1="12" y1="3" x2="12" y2="12.5" /><circle cx="12" cy="13" r="1" fill="currentColor" /></I>,
   // stamp — a press-down rubber stamp over its impression line (the tool-chest motif)
   stamp: (s) => <I size={s}><rect x="8" y="3" width="8" height="6" rx="1" /><path d="M6 15 L 9 9 H 15 L 18 15 Z" /><line x1="4" y1="19" x2="20" y2="19" /></I>,
