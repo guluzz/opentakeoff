@@ -1,14 +1,14 @@
 #!/bin/bash
 # One-command setup for running OpenTakeoff locally on a Mac:
 #
-#   curl -fsSL https://raw.githubusercontent.com/Kentucky-ai/opentakeoff/local-projects/scripts/setup-mac.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/guluzz/opentakeoff/local-projects/scripts/setup-mac.sh | bash
 #
 # Clones the repo (or updates an existing ~/opentakeoff), builds the web app,
 # and installs an OpenTakeoff.app launcher into /Applications.
 set -e
 
 BRANCH="${OPENTAKEOFF_BRANCH:-local-projects}"
-REPO_URL="https://github.com/Kentucky-ai/opentakeoff.git"
+REPO_URL="${OPENTAKEOFF_REPO:-https://github.com/guluzz/opentakeoff.git}"
 REPO_DIR="${OPENTAKEOFF_DIR:-$HOME/opentakeoff}"
 APP="/Applications/OpenTakeoff.app"
 
