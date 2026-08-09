@@ -34,7 +34,11 @@ if [ -d "$REPO_DIR/.git" ]; then
   echo "Updating existing checkout at $REPO_DIR ..."
   git -C "$REPO_DIR" fetch origin
   git -C "$REPO_DIR" checkout "$BRANCH"
-  git -C "$REPO_DIR" pull --ff-only origin "$BRANCH"
+  # Reset to the remote branch instead of pull --ff-only: upstream re-syncs
+  # force-push $BRANCH (rebased history), which a fast-forward pull can't follow.
+  # This script manages machines that don't develop in this checkout, so
+  # discarding local drift here is the intent.
+  git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
 else
   echo "Cloning into $REPO_DIR ..."
   git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
