@@ -26,7 +26,7 @@ const baseName = (path) => path.split("/").pop() || path;
 
 function safeName(name) {
   // keep it a readable filename; strip anything that could break a path
-  const stem = String(name || "takeoff").replace(/[\/\\:*?"<>|]+/g, "_").trim() || "takeoff";
+  const stem = String(name || "takeoff").replace(/[/\\:*?"<>|]+/g, "_").trim() || "takeoff";
   return stem.replace(/\.zip$/i, "");
 }
 

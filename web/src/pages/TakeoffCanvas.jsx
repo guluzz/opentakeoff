@@ -560,7 +560,7 @@ export default function TakeoffCanvas() {
   const [exportedSig, setExportedSig] = useState(() => localStorage.getItem(LS_EXPORT_SIG) || "");
   const [downloadAt, setDownloadAt] = useState(() => { const v = Number(localStorage.getItem(LS_DL_AT)); return v > 0 ? v : null; });
   const [downloadSig, setDownloadSig] = useState(() => localStorage.getItem(LS_DL_SIG) || "");
-  const [clockTick, setClockTick] = useState(0);
+  const [, setClockTick] = useState(0);   // setter-only: each tick re-renders so the backup age re-reads Date.now()
   const fileInputRef = useRef(null);                    // hidden <input type=file> for "Open PDF"
   const importInputRef = useRef(null);                  // hidden <input type=file> for "Import takeoff…" (the agent-JSON handoff)
 

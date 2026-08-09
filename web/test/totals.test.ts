@@ -208,11 +208,14 @@ test("reportJson: v1 key set pinned — top level, sheets[], markups[], by_sheet
   assert.deepEqual(Object.keys(j.by_sheet[0]), ["sheet_id", "sheet", "rows"]);
   assert.deepEqual(Object.keys(j.by_sheet[0].rows[0]),
     ["id", "finish_tag", "color", "multiplier", "shape_count", "floor_sf", "wall_sf", "border_sf", "lf", "ea"]);
-  // row `columns` appended after materials (additive-only v1, 2026-07-07)
+  // row `columns` appended after materials (additive-only v1, 2026-07-07);
+  // the six pricing keys (price_unit … line_total) append after materials and
+  // before columns (Pricing & bid — additive-only v1, always emitted)
   assert.deepEqual(Object.keys(j.conditions[0]),
     ["id", "finish_tag", "color", "fill", "hatch", "multiplier", "waste_pct", "shape_count",
      "floor_sf", "wall_sf", "border_sf", "lf", "ea", "total_sf",
-     "floor_sf_net", "wall_sf_net", "border_sf_net", "lf_net", "total_sf_net", "sy_net", "materials", "columns"]);
+     "floor_sf_net", "wall_sf_net", "border_sf_net", "lf_net", "total_sf_net", "sy_net", "materials",
+     "price_unit", "price_material", "price_labor", "material_cost", "labor_cost", "line_total", "columns"]);
 });
 
 test("reportJson: roll_goods rides through verbatim; a non-array coerces to [] (#136)", () => {
